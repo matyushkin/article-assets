@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Conway's Game of Life</title>
+<style>
+body { margin: 0; display: flex; justify-content: center; align-items: center; min-height: 100vh; background: #fff; font-family: system-ui, sans-serif; }
+#gol-container { max-width: 720px; width: 100%; padding: 16px; }
+canvas { width: 100%; border: 1px solid #ddd; border-radius: 8px; cursor: crosshair; display: block; }
+.controls { display: flex; gap: 8px; align-items: center; margin-top: 8px; flex-wrap: wrap; }
+button { padding: 6px 16px; border: 1px solid #ccc; border-radius: 4px; background: #fff; cursor: pointer; font-size: 14px; }
+button:hover { background: #f5f5f5; }
+select { padding: 5px 8px; border: 1px solid #ccc; border-radius: 4px; font-size: 14px; background: #fff; cursor: pointer; }
+#gol-gen { margin-left: auto; font-size: 13px; color: #888; }
+</style>
+</head>
+<body>
+<div id="gol-container">
+<canvas id="gol-canvas"></canvas>
+<div class="controls">
+<button id="gol-play">▶ Play</button>
+<button id="gol-step">Step</button>
+<select id="gol-preset">
+<option value="glider-gun">Gosper Glider Gun</option>
+<option value="pulsar">Pulsar</option>
+<option value="pentadecathlon">Pentadecathlon</option>
+<option value="lwss">Lightweight Spaceship</option>
+<option value="r-pentomino">R-Pentomino</option>
+<option value="acorn">Acorn</option>
+<option value="diehard">Diehard</option>
+<option value="random">Random</option>
+<option value="clear">Clear</option>
+</select>
+<span id="gol-gen">Generation: 0</span>
+</div>
+</div>
+<script>
+(function(){
+const COLS=90,ROWS=50,CELL=8;
+const canvas=document.getElementById('gol-canvas');
+const ctx=canvas.getContext('2d');
+canvas.width=COLS*CELL;canvas.height=ROWS*CELL;
+let grid=Array.from({length:ROWS},()=>new Uint8Array(COLS));
+let running=false,timer=null,gen=0;
+const ALIVE='#3b82f6',DEAD='#fff',LINE='#f0f0f0';
+
+const presets={
+'glider-gun':[[1,25],[2,23],[2,25],[3,13],[3,14],[3,21],[3,22],[3,35],[3,36],
+[4,12],[4,16],[4,21],[4,22],[4,35],[4,36],[5,1],[5,2],[5,11],[5,17],[5,21],[5,22],
+[6,1],[6,2],[6,11],[6,15],[6,17],[6,18],[6,23],[6,25],[7,11],[7,17],[7,25],
+[8,12],[8,16],[9,13],[9,14]],
+
+'pulsar':(function(){
+  const q=[[2,4],[2,5],[2,6],[2,10],[2,11],[2,12],
+  [4,2],[4,7],[4,9],[4,14],[5,2],[5,7],[5,9],[5,14],[6,2],[6,7],[6,9],[6,14],
+  [7,4],[7,5],[7,6],[7,10],[7,11],[7,12]];
+  const all=[];
+  q.forEach(([r,c])=>{all.push([r,c]);all.push([14-r,c]);});
+  const cy=20,cx=40;
+  return all.map(([r,c])=>[r+cy,c+cx]);
+})(),
+
+'pentadecathlon':(function(){
+  const cells=[[0,1],[1,1],[2,0],[2,2],[3,1],[4,1],[5,1],[6,1],[7,0],[7,2],[8,1],[9,1]];
+  return cells.map(([r,c])=>[r+20,c+44]);
+})(),
+
+'lwss':(function(){
+  const cells=[[0,1],[0,4],[1,0],[2,0],[2,4],[3,0],[3,1],[3,2],[3,3]];
+  return cells.map(([r,c])=>[r+23,c+10]);
+})(),
+
+'r-pentomino':[[23,44],[23,45],[24,43],[24,44],[25,44]],
+
+'acorn':[[23,40],[24,42],[25,39],[25,40],[25,43],[25,44],[25,45]],
+
+'diehard':[[23,44],[24,38],[24,39],[25,39],[25,43],[25,44],[25,45]]
+};
+
+function draw(){
+  ctx.fillStyle=DEAD;ctx.fillRect(0,0,canvas.width,canvas.height);
+  ctx.fillStyle=ALIVE;
+  for(let r=0;r<ROWS;r++)for(let c=0;c<COLS;c++)
+    if(grid[r][c])ctx.fillRect(c*CELL+1,r*CELL+1,CELL-1,CELL-1);
+  ctx.strokeStyle=LINE;ctx.lineWidth=0.5;
+  for(let r=0;r<=ROWS;r++){ctx.beginPath();ctx.moveTo(0,r*CELL);ctx.lineTo(COLS*CELL,r*CELL);ctx.stroke();}
+  for(let c=0;c<=COLS;c++){ctx.beginPath();ctx.moveTo(c*CELL,0);ctx.lineTo(c*CELL,ROWS*CELL);ctx.stroke();}
+}
+
+function step(){
+  const next=Array.from({length:ROWS},()=>new Uint8Array(COLS));
+  for(let r=0;r<ROWS;r++)for(let c=0;c<COLS;c++){
+    let n=0;
+    for(let dr=-1;dr<=1;dr++)for(let dc=-1;dc<=1;dc++){
+      if(!dr&&!dc)continue;
+      const nr=(r+dr+ROWS)%ROWS,nc=(c+dc+COLS)%COLS;
+      n+=grid[nr][nc];
+    }
+    next[r][c]=grid[r][c]?(n===2||n===3?1:0):(n===3?1:0);
+  }
+  grid=next;gen++;
+  document.getElementById('gol-gen').textContent='Generation: '+gen;
+  draw();
+}
+
+function toggle(e){
+  const rect=canvas.getBoundingClientRect();
+  const scaleX=canvas.width/rect.width;
+  const c=Math.floor((e.clientX-rect.left)*scaleX/CELL);
+  const r=Math.floor((e.clientY-rect.top)*scaleX/CELL);
+  if(r>=0&&r<ROWS&&c>=0&&c<COLS){grid[r][c]^=1;draw();}
+}
+
+function loadPreset(name){
+  grid=Array.from({length:ROWS},()=>new Uint8Array(COLS));
+  gen=0;
+  if(name==='random'){
+    grid=Array.from({length:ROWS},()=>new Uint8Array(COLS).map(()=>Math.random()<0.3?1:0));
+  } else if(name!=='clear' && presets[name]){
+    presets[name].forEach(([r,c])=>{if(r>=0&&r<ROWS&&c>=0&&c<COLS)grid[r][c]=1;});
+  }
+  document.getElementById('gol-gen').textContent='Generation: 0';
+  draw();
+}
+
+canvas.addEventListener('click',toggle);
+document.getElementById('gol-play').addEventListener('click',function(){
+  running=!running;
+  this.textContent=running?'⏸ Pause':'▶ Play';
+  if(running)timer=setInterval(step,100);else clearInterval(timer);
+});
+document.getElementById('gol-step').addEventListener('click',()=>{if(!running)step();});
+document.getElementById('gol-preset').addEventListener('change',function(){loadPreset(this.value);});
+
+loadPreset('glider-gun');
+})();
+</script>
+</body>
+</html>

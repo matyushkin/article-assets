@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>L-Systems</title>
+<style>
+body { margin: 0; display: flex; justify-content: center; align-items: center; min-height: 100vh; background: #fff; font-family: system-ui, sans-serif; }
+#ls-container { max-width: 720px; width: 100%; padding: 16px; }
+canvas { width: 100%; border: 1px solid #ddd; border-radius: 8px; display: block; background: #fff; }
+.controls { display: flex; gap: 8px; align-items: center; margin-top: 8px; flex-wrap: wrap; }
+select { padding: 5px 8px; border: 1px solid #ccc; border-radius: 4px; font-size: 14px; background: #fff; cursor: pointer; }
+button { padding: 6px 16px; border: 1px solid #ccc; border-radius: 4px; background: #fff; cursor: pointer; font-size: 14px; }
+button:hover { background: #f5f5f5; }
+#ls-info { margin-left: auto; font-size: 13px; color: #888; }
+#ls-rules { font-size: 12px; color: #666; margin-top: 6px; font-family: monospace; line-height: 1.6; }
+</style>
+</head>
+<body>
+<div id="ls-container">
+<canvas id="ls-canvas"></canvas>
+<div class="controls">
+<select id="ls-preset">
+<option value="tree">Fractal Tree</option>
+<option value="koch">Koch Snowflake</option>
+<option value="sierpinski">Sierpinski Triangle</option>
+<option value="dragon">Dragon Curve</option>
+<option value="plant">Stochastic Plant</option>
+<option value="hilbert">Hilbert Curve</option>
+<option value="bush">Bush</option>
+</select>
+<button id="ls-minus">−</button>
+<span id="ls-iter">5</span>
+<button id="ls-plus">+</button>
+<span id="ls-info"></span>
+</div>
+<div id="ls-rules"></div>
+</div>
+<script>
+(function(){
+const canvas=document.getElementById('ls-canvas');
+const ctx=canvas.getContext('2d');
+canvas.width=720;canvas.height=400;
+
+const systems={
+tree:{
+  axiom:'F',
+  rules:{F:'FF+[+F-F-F]-[-F+F+F]'},
+  angle:22.5,startAngle:-90,
+  iterations:4,maxIter:6,
+  color:'#2d6a4f',
+  desc:'Axiom: F | Rule: F → FF+[+F-F-F]-[-F+F+F] | Angle: 22.5°'
+},
+koch:{
+  axiom:'F--F--F',
+  rules:{F:'F+F--F+F'},
+  angle:60,startAngle:0,
+  iterations:4,maxIter:6,
+  color:'#3b82f6',
+  desc:'Axiom: F--F--F | Rule: F → F+F--F+F | Angle: 60°'
+},
+sierpinski:{
+  axiom:'F-G-G',
+  rules:{F:'F-G+F+G-F',G:'GG'},
+  angle:120,startAngle:0,
+  iterations:6,maxIter:9,
+  color:'#7c3aed',
+  desc:'Axiom: F-G-G | Rules: F → F-G+F+G-F, G → GG | Angle: 120°'
+},
+dragon:{
+  axiom:'F',
+  rules:{F:'F+G',G:'F-G'},
+  angle:90,startAngle:0,
+  iterations:10,maxIter:16,
+  color:'#dc2626',
+  desc:'Axiom: F | Rules: F → F+G, G → F-G | Angle: 90°'
+},
+plant:{
+  axiom:'X',
+  rules:{X:'F+[[X]-X]-F[-FX]+X',F:'FF'},
+  angle:25,startAngle:-65,
+  iterations:5,maxIter:7,
+  color:'#16a34a',
+  desc:'Axiom: X | Rules: X → F+[[X]-X]-F[-FX]+X, F → FF | Angle: 25°'
+},
+hilbert:{
+  axiom:'A',
+  rules:{A:'+BF-AFA-FB+',B:'-AF+BFB+FA-'},
+  angle:90,startAngle:0,
+  iterations:5,maxIter:8,
+  color:'#ea580c',
+  desc:'Axiom: A | Rules: A → +BF-AFA-FB+, B → -AF+BFB+FA- | Angle: 90°'
+},
+bush:{
+  axiom:'F',
+  rules:{F:'F[+F]F[-F][F]'},
+  angle:20,startAngle:-90,
+  iterations:4,maxIter:6,
+  color:'#15803d',
+  desc:'Axiom: F | Rule: F → F[+F]F[-F][F] | Angle: 20°'
+}
+};
+
+let currentPreset='tree';
+let currentIter=systems.tree.iterations;
+
+function generate(axiom,rules,iterations){
+  let str=axiom;
+  for(let i=0;i<iterations;i++){
+    let next='';
+    for(const ch of str) next+=rules[ch]||ch;
+    str=next;
+  }
+  return str;
+}
+
+function computeBounds(str,angle,startAngle){
+  let x=0,y=0,a=startAngle*Math.PI/180;
+  let minX=0,maxX=0,minY=0,maxY=0;
+  const stack=[];
+  const da=angle*Math.PI/180;
+  for(const ch of str){
+    if(ch==='F'||ch==='G'){
+      x+=Math.cos(a);y+=Math.sin(a);
+      minX=Math.min(minX,x);maxX=Math.max(maxX,x);
+      minY=Math.min(minY,y);maxY=Math.max(maxY,y);
+    } else if(ch==='+'){a-=da;}
+    else if(ch==='-'){a+=da;}
+    else if(ch==='['){stack.push({x,y,a});}
+    else if(ch===']'){const s=stack.pop();x=s.x;y=s.y;a=s.a;}
+  }
+  return{minX,maxX,minY,maxY};
+}
+
+function drawSystem(){
+  const sys=systems[currentPreset];
+  const iter=currentIter;
+  const str=generate(sys.axiom,sys.rules,iter);
+  const bounds=computeBounds(str,sys.angle,sys.startAngle);
+
+  const w=bounds.maxX-bounds.minX||1;
+  const h=bounds.maxY-bounds.minY||1;
+  const pad=30;
+  const scaleX=(canvas.width-2*pad)/w;
+  const scaleY=(canvas.height-2*pad)/h;
+  const scale=Math.min(scaleX,scaleY);
+  const offX=pad-bounds.minX*scale+(canvas.width-2*pad-w*scale)/2;
+  const offY=pad-bounds.minY*scale+(canvas.height-2*pad-h*scale)/2;
+
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  ctx.strokeStyle=sys.color;
+  ctx.lineWidth=Math.max(0.5,2-iter*0.2);
+  ctx.lineCap='round';
+
+  let x=0,y=0,a=sys.startAngle*Math.PI/180;
+  const stack=[];
+  const da=sys.angle*Math.PI/180;
+
+  ctx.beginPath();
+  ctx.moveTo(x*scale+offX,y*scale+offY);
+
+  for(const ch of str){
+    if(ch==='F'||ch==='G'){
+      x+=Math.cos(a);y+=Math.sin(a);
+      ctx.lineTo(x*scale+offX,y*scale+offY);
+    } else if(ch==='+'){a-=da;}
+    else if(ch==='-'){a+=da;}
+    else if(ch==='['){stack.push({x,y,a});ctx.moveTo(x*scale+offX,y*scale+offY);}
+    else if(ch===']'){
+      ctx.stroke();ctx.beginPath();
+      const s=stack.pop();x=s.x;y=s.y;a=s.a;
+      ctx.moveTo(x*scale+offX,y*scale+offY);
+    }
+  }
+  ctx.stroke();
+
+  document.getElementById('ls-info').textContent=
+    'Iterations: '+iter+' | Segments: '+str.replace(/[^FG]/g,'').length;
+  document.getElementById('ls-rules').textContent=sys.desc;
+  document.getElementById('ls-iter').textContent=iter;
+}
+
+document.getElementById('ls-preset').addEventListener('change',function(){
+  currentPreset=this.value;
+  currentIter=systems[currentPreset].iterations;
+  drawSystem();
+});
+
+document.getElementById('ls-minus').addEventListener('click',()=>{
+  if(currentIter>1){currentIter--;drawSystem();}
+});
+
+document.getElementById('ls-plus').addEventListener('click',()=>{
+  if(currentIter<systems[currentPreset].maxIter){currentIter++;drawSystem();}
+});
+
+drawSystem();
+})();
+</script>
+</body>
+</html>
