@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Percolation Phase Transition</title>
+<style>
+body { margin: 0; display: flex; justify-content: center; align-items: center; min-height: 100vh; background: #fff; font-family: system-ui, sans-serif; }
+#pc-container { max-width: 720px; width: 100%; padding: 16px; }
+canvas { width: 100%; border: 1px solid #ddd; border-radius: 8px; display: block; }
+.controls { display: flex; gap: 10px; align-items: center; margin-top: 8px; flex-wrap: wrap; }
+input[type=range] { flex: 1; min-width: 140px; }
+button { padding: 5px 12px; border: 1px solid #ccc; border-radius: 4px; background: #fff; cursor: pointer; font-size: 13px; }
+button:hover { background: #f5f5f5; }
+button.active { background: #3b82f6; color: #fff; border-color: #3b82f6; }
+#pc-info { font-size: 12px; color: #666; width: 100%; margin-top: 4px; line-height: 1.5; }
+.label { font-size: 14px; color: #555; white-space: nowrap; }
+.grid-types { display: flex; gap: 4px; }
+.pc-exp { font-weight: 600; color: #3b82f6; }
+</style>
+</head>
+<body>
+<div id="pc-container">
+<canvas id="pc-canvas"></canvas>
+<div class="controls">
+<span class="label">p = <span id="pc-val">0.50</span></span>
+<input type="range" id="pc-slider" min="0" max="100" value="50">
+<div class="grid-types">
+<button class="active" data-grid="square">Square (4)</button>
+<button data-grid="hexagonal">Hexagonal (6)</button>
+<button data-grid="triangular">Triangular (3)</button>
+</div>
+<button id="pc-new">New</button>
+</div>
+<div id="pc-info"></div>
+</div>
+<script>
+(function(){
+const canvas = document.getElementById('pc-canvas');
+const ctx = canvas.getContext('2d');
+const W = 720, H = 400;
+canvas.width = W; canvas.height = H;
+
+let gridType = 'square';
+let seed = Math.floor(Math.random() * 1e7);
+let thresholds = null;
+let cachedGrid = null;
+let experimentalPc = null; // pre-computed percolation threshold for this grid
+
+function mulberry32(s) {
+  return function() {
+    s |= 0; s = s + 0x6D2B79F5 | 0;
+    let t = Math.imul(s ^ s >>> 15, 1 | s);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+// --- Grid geometry ---
+const CELL_AREA = W * H / 4500;
+
+function gridParams() {
+  if (gridType === 'square') {
+    const side = Math.sqrt(CELL_AREA);
+    const cols = Math.ceil(W / side) + 2;
+    const rows = Math.ceil(H / side) + 2;
+    const ox = -(cols * side - W) / 2;
+    const oy = -(rows * side - H) / 2;
+    return { type: 'square', rows, cols, side, ox, oy, pc: '0.593' };
+  }
+  if (gridType === 'hexagonal') {
+    const R = Math.sqrt(2 * CELL_AREA / (3 * Math.sqrt(3)));
+    const colSp = Math.sqrt(3) * R;
+    const rowSp = 1.5 * R;
+    const cols = Math.ceil(W / colSp) + 2;
+    const rows = Math.ceil(H / rowSp) + 2;
+    const ox = -(cols * colSp - W) / 2;
+    const oy = -(rows * rowSp - H) / 2;
+    return { type: 'hexagonal', rows, cols, R, colSp, rowSp, ox, oy, pc: '0.500' };
+  }
+  if (gridType === 'triangular') {
+    const a = Math.sqrt(4 * CELL_AREA / Math.sqrt(3));
+    const h = Math.sqrt(3) / 2 * a;
+    const cols = Math.ceil(2 * W / a) + 4;
+    const rows = Math.ceil(H / h) + 2;
+    const ox = -(cols * a / 2 - W) / 2;
+    const oy = -(rows * h - H) / 2;
+    return { type: 'triangular', rows, cols, a, h, ox, oy, pc: '0.697' };
+  }
+}
+
+function generateThresholds(gp) {
+  const rng = mulberry32(seed);
+  thresholds = Array.from({length: gp.rows}, () =>
+    Array.from({length: gp.cols}, () => rng())
+  );
+}
+
+// --- Neighbors ---
+function getNeighbors(r, c, gp) {
+  const results = [];
+  const add = (nr, nc) => {
+    if (nr >= 0 && nr < gp.rows && nc >= 0 && nc < gp.cols) results.push([nr, nc]);
+  };
+  if (gp.type === 'square') {
+    add(r-1, c); add(r+1, c); add(r, c-1); add(r, c+1);
+  } else if (gp.type === 'hexagonal') {
+    add(r, c-1); add(r, c+1);
+    if (r % 2 === 0) {
+      add(r-1, c-1); add(r-1, c); add(r+1, c-1); add(r+1, c);
+    } else {
+      add(r-1, c); add(r-1, c+1); add(r+1, c); add(r+1, c+1);
+    }
+  } else if (gp.type === 'triangular') {
+    add(r, c-1); add(r, c+1);
+    if ((r + c) % 2 === 0) add(r + 1, c); else add(r - 1, c);
+  }
+  return results;
+}
+
+// --- Union-Find ---
+function makeUF(n) {
+  const parent = new Int32Array(n).fill(-1);
+  const rank = new Uint8Array(n);
+  const size = new Int32Array(n);
+  const color = new Int32Array(n).fill(-1);
+  let nextColor = 0;
+  return {
+    init(x) { parent[x] = x; size[x] = 1; rank[x] = 0; color[x] = nextColor++; },
+    find(x) { while (parent[x] !== x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; },
+    union(a, b) {
+      let ra = this.find(a), rb = this.find(b);
+      if (ra === rb) return;
+      if (size[ra] < size[rb]) { let t = ra; ra = rb; rb = t; }
+      parent[rb] = ra; size[ra] += size[rb];
+      if (rank[ra] === rank[rb]) rank[ra]++;
+    },
+    parent, size, color
+  };
+}
+
+function hueForColor(ci) { return (ci * 137.508) % 360; }
+
+// --- Find experimental p_c ---
+// Run full Union-Find, find the threshold where top-bottom percolation first occurs
+function findExperimentalPc(gp) {
+  const cells = [];
+  for (let r = 0; r < gp.rows; r++)
+    for (let c = 0; c < gp.cols; c++)
+      cells.push({ r, c, t: thresholds[r][c] });
+  cells.sort((a, b) => a.t - b.t);
+
+  const total = gp.rows * gp.cols;
+  const uf = makeUF(total);
+  const open = Array.from({length: gp.rows}, () => new Uint8Array(gp.cols));
+  const idx = (r, c) => r * gp.cols + c;
+
+  // Track which roots touch top/bottom rows
+  const touchesTop = new Set();
+  const touchesBot = new Set();
+
+  for (const cell of cells) {
+    const { r, c, t } = cell;
+    open[r][c] = 1;
+    const i = idx(r, c);
+    uf.init(i);
+
+    for (const [nr, nc] of getNeighbors(r, c, gp)) {
+      if (!open[nr][nc]) continue;
+      uf.union(i, idx(nr, nc));
+    }
+
+    // Update top/bottom tracking
+    const root = uf.find(i);
+    if (r === 0) touchesTop.add(i);
+    if (r === gp.rows - 1) touchesBot.add(i);
+
+    // Check: does any top cell share root with any bottom cell?
+    // Efficient: check if current root connects top and bot
+    let hasTop = false, hasBot = false;
+    for (const ti of touchesTop) {
+      if (uf.find(ti) === root) { hasTop = true; break; }
+    }
+    if (hasTop) {
+      for (const bi of touchesBot) {
+        if (uf.find(bi) === root) { hasBot = true; break; }
+      }
+    }
+    if (hasTop && hasBot) return t;
+  }
+  return 1.0;
+}
+
+// --- Drawing ---
+function drawSquareCell(r, c, gp, fill) {
+  ctx.fillStyle = fill;
+  ctx.fillRect(gp.ox + c * gp.side, gp.oy + r * gp.side, gp.side - 0.5, gp.side - 0.5);
+}
+
+function drawHexCell(r, c, gp, fill) {
+  const R = gp.R;
+  const cx = gp.ox + gp.colSp * c + (r % 2) * gp.colSp / 2 + gp.colSp / 2;
+  const cy = gp.oy + gp.rowSp * r + R;
+  ctx.fillStyle = fill;
+  ctx.beginPath();
+  for (let i = 0; i < 6; i++) {
+    const angle = Math.PI / 3 * i - Math.PI / 6;
+    const px = cx + (R - 0.3) * Math.cos(angle);
+    const py = cy + (R - 0.3) * Math.sin(angle);
+    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+  }
+  ctx.closePath();
+  ctx.fill();
+}
+
+function drawTriCell(r, c, gp, fill) {
+  const a = gp.a, h = gp.h;
+  const xLeft = gp.ox + c * a / 2;
+  const yTop = gp.oy + r * h;
+  ctx.fillStyle = fill;
+  ctx.beginPath();
+  if ((r + c) % 2 === 0) {
+    ctx.moveTo(xLeft + a / 2, yTop + 0.3);
+    ctx.lineTo(xLeft + a - 0.3, yTop + h - 0.3);
+    ctx.lineTo(xLeft + 0.3, yTop + h - 0.3);
+  } else {
+    ctx.moveTo(xLeft + 0.3, yTop + 0.3);
+    ctx.lineTo(xLeft + a - 0.3, yTop + 0.3);
+    ctx.lineTo(xLeft + a / 2, yTop + h - 0.3);
+  }
+  ctx.closePath();
+  ctx.fill();
+}
+
+const drawCellFn = { square: drawSquareCell, hexagonal: drawHexCell, triangular: drawTriCell };
+
+// --- Main draw ---
+function draw() {
+  const p = parseInt(document.getElementById('pc-slider').value) / 100;
+  document.getElementById('pc-val').textContent = p.toFixed(2);
+
+  const gp = gridParams();
+  if (!cachedGrid || cachedGrid.type !== gp.type || cachedGrid.rows !== gp.rows || cachedGrid.cols !== gp.cols) {
+    generateThresholds(gp);
+    cachedGrid = { type: gp.type, rows: gp.rows, cols: gp.cols };
+    experimentalPc = findExperimentalPc(gp);
+  }
+
+  const cells = [];
+  for (let r = 0; r < gp.rows; r++)
+    for (let c = 0; c < gp.cols; c++)
+      cells.push({ r, c, t: thresholds[r][c] });
+  cells.sort((a, b) => a.t - b.t);
+
+  const total = gp.rows * gp.cols;
+  const uf = makeUF(total);
+  const open = Array.from({length: gp.rows}, () => new Uint8Array(gp.cols));
+  const idx = (r, c) => r * gp.cols + c;
+
+  for (const cell of cells) {
+    if (cell.t >= p) break;
+    const { r, c } = cell;
+    open[r][c] = 1;
+    const i = idx(r, c);
+    uf.init(i);
+    for (const [nr, nc] of getNeighbors(r, c, gp)) {
+      if (open[nr][nc]) uf.union(i, idx(nr, nc));
+    }
+  }
+
+  const topRoots = new Set(), botRoots = new Set();
+  for (let c = 0; c < gp.cols; c++) {
+    if (open[0][c]) topRoots.add(uf.find(idx(0, c)));
+    if (open[gp.rows - 1][c]) botRoots.add(uf.find(idx(gp.rows - 1, c)));
+  }
+  let percRoot = -1;
+  topRoots.forEach(r => { if (botRoots.has(r)) percRoot = r; });
+
+  // Clip drawing to canvas
+  ctx.save();
+  ctx.clearRect(0, 0, W, H);
+  ctx.beginPath();
+  ctx.rect(0, 0, W, H);
+  ctx.clip();
+
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0, 0, W, H);
+
+  const drawFn = drawCellFn[gp.type];
+  let filled = 0, maxSize = 0;
+
+  for (let r = 0; r < gp.rows; r++) {
+    for (let c = 0; c < gp.cols; c++) {
+      if (!open[r][c]) continue;
+      filled++;
+      const root = uf.find(idx(r, c));
+      const sz = uf.size[root];
+      if (sz > maxSize) maxSize = sz;
+      let fill;
+      if (root === percRoot && percRoot >= 0) {
+        fill = '#3b82f6';
+      } else if (sz <= 2) {
+        fill = '#d1d5db';
+      } else {
+        fill = `hsl(${hueForColor(uf.color[root])}, 50%, 60%)`;
+      }
+      drawFn(r, c, gp, fill);
+    }
+  }
+  ctx.restore();
+
+  const nLabel = gp.type === 'square' ? '4' : gp.type === 'hexagonal' ? '6' : '3';
+  const percStatus = percRoot >= 0 ? 'PERCOLATES ✓' : 'No percolation';
+  const expPart = p >= experimentalPc
+    ? `, <span class="pc-exp">experimental ≈ ${experimentalPc.toFixed(3)}</span>`
+    : '';
+  document.getElementById('pc-info').innerHTML =
+    `${nLabel} neighbors | ${percStatus} | p_c: theoretical ≈ ${gp.pc}${expPart}`;
+}
+
+// --- Controls ---
+document.getElementById('pc-slider').addEventListener('input', draw);
+
+document.getElementById('pc-new').addEventListener('click', () => {
+  seed = Math.floor(Math.random() * 1e7);
+  cachedGrid = null;
+  draw();
+});
+
+document.querySelectorAll('.grid-types button').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.grid-types button').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    gridType = btn.dataset.grid;
+    cachedGrid = null;
+    draw();
+  });
+});
+
+draw();
+})();
+</script>
+</body>
+</html>

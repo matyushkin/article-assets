@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Compression Algorithm Explorer</title>
+<style>
+body { margin: 0; display: flex; justify-content: center; align-items: center; min-height: 100vh; background: #fff; font-family: system-ui, sans-serif; }
+#kc-container { max-width: 720px; width: 100%; padding: 12px; }
+.input-row { display: flex; gap: 8px; margin-bottom: 8px; }
+textarea { flex: 1; padding: 6px; border: 1px solid #ccc; border-radius: 4px; font-family: monospace; font-size: 13px; resize: vertical; min-height: 36px; height: 36px; }
+.presets { display: flex; gap: 5px; margin-bottom: 8px; flex-wrap: wrap; }
+.presets button { font-size: 12px; padding: 4px 10px; border: 1px solid #ccc; border-radius: 4px; background: #fff; cursor: pointer; }
+.presets button:hover { background: #f5f5f5; }
+.results { border: 1px solid #ddd; border-radius: 8px; padding: 12px; background: #fafafa; }
+.bar-container { margin: 5px 0; }
+.bar-label { font-size: 13px; color: #555; margin-bottom: 4px; display: flex; justify-content: space-between; }
+.bar-bg { background: #eee; border-radius: 4px; height: 20px; position: relative; overflow: hidden; }
+.bar-fill { height: 100%; border-radius: 4px; transition: width 0.3s; display: flex; align-items: center; padding-left: 8px; font-size: 11px; color: #fff; white-space: nowrap; }
+.summary { margin-top: 8px; font-size: 12px; color: #666; line-height: 1.4; }
+.scale-note { font-size: 11px; color: #aaa; margin-bottom: 8px; }
+h3 { margin: 0 0 4px; font-size: 16px; font-weight: 600; }
+</style>
+</head>
+<body>
+<div id="kc-container">
+<div class="presets">
+<button onclick="setPreset('aaaa')">aaaa...a (100×)</button>
+<button onclick="setPreset('pi')">π (100 digits)</button>
+<button onclick="setPreset('random')">Random (100 chars)</button>
+<button onclick="setPreset('pattern')">abcabc... (100×)</button>
+<button onclick="setPreset('english')">English text</button>
+<button onclick="setPreset('dna')">DNA sequence</button>
+</div>
+<div class="input-row">
+<textarea id="kc-input" placeholder="Enter any string to analyze...">aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa</textarea>
+</div>
+<div class="results">
+<h3>Compressed size (% of original)</h3>
+<div class="scale-note">Lower = better compression. Each algorithm uses a different strategy.</div>
+<div id="bars"></div>
+<div class="summary" id="kc-summary"></div>
+</div>
+</div>
+<script>
+const algorithms = [
+  { id: 'raw', name: 'Original (uncompressed)', color: '#94a3b8', fn: s => s.length },
+  { id: 'rle', name: 'RLE — run-length encoding', color: '#f59e0b', fn: rleSize },
+  { id: 'huffman', name: 'Huffman — variable-length codes', color: '#8b5cf6', fn: huffmanSize },
+  { id: 'lz77', name: 'LZ77 — sliding window (window=256)', color: '#3b82f6', fn: lz77Size },
+  { id: 'lzw', name: 'LZW — dictionary (GIF, early ZIP)', color: '#10b981', fn: lzwSize },
+  { id: 'deflate', name: 'Deflate — LZ77+Huffman (gzip, ZIP, PNG)', color: '#ef4444', fn: deflateSize },
+  { id: 'zstd', name: 'Zstandard — LZ77+ANS (2016, Facebook)', color: '#0ea5e9', fn: zstdSize },
+];
+
+// --- RLE ---
+function rleSize(s) {
+  if (!s) return 0;
+  let out = 0, i = 0;
+  while (i < s.length) {
+    let c = s[i], count = 1;
+    while (i + count < s.length && s[i + count] === c) count++;
+    // encode as: count (if >1) + char
+    out += (count > 1 ? String(count).length : 0) + 1;
+    i += count;
+  }
+  return out;
+}
+
+// --- Huffman ---
+function huffmanSize(s) {
+  if (!s) return 0;
+  const freq = {};
+  for (const c of s) freq[c] = (freq[c] || 0) + 1;
+  const entries = Object.entries(freq);
+  if (entries.length <= 1) return Math.ceil(s.length / 8) + 1;
+
+  // Build Huffman tree via priority queue
+  let heap = entries.map(([ch, f]) => ({ freq: f, depth: 0 }));
+  heap.sort((a, b) => a.freq - b.freq);
+
+  while (heap.length > 1) {
+    const a = heap.shift(), b = heap.shift();
+    heap.push({ freq: a.freq + b.freq, left: a, right: b });
+    heap.sort((x, y) => x.freq - y.freq);
+  }
+
+  // Calculate total bits
+  let totalBits = 0;
+  function calcBits(node, depth) {
+    if (!node.left && !node.right) {
+      totalBits += node.freq * depth;
+      return;
+    }
+    if (node.left) calcBits(node.left, depth + 1);
+    if (node.right) calcBits(node.right, depth + 1);
+  }
+  calcBits(heap[0], 0);
+
+  // Add tree overhead: ~10 bits per symbol for code table
+  const overhead = entries.length * 10;
+  return Math.ceil((totalBits + overhead) / 8);
+}
+
+// --- LZ77 ---
+function lz77Size(s) {
+  if (!s) return 0;
+  const W = 256;
+  let bits = 0, i = 0;
+  while (i < s.length) {
+    let bestLen = 0, bestDist = 0;
+    const start = Math.max(0, i - W);
+    for (let j = start; j < i; j++) {
+      let len = 0;
+      while (i + len < s.length && s[j + len] === s[i + len] && len < 255) len++;
+      if (len > bestLen) { bestLen = len; bestDist = i - j; }
+    }
+    if (bestLen >= 3) {
+      // (distance, length) pair: ~8 bits distance + ~8 bits length
+      bits += 1 + 8 + 8;
+      i += bestLen;
+    } else {
+      // literal: flag bit + 8 bits char
+      bits += 1 + 8;
+      i++;
+    }
+  }
+  return Math.ceil(bits / 8);
+}
+
+// --- LZW ---
+function lzwSize(s) {
+  if (!s) return 0;
+  // Initialize dictionary with single characters
+  const dict = {};
+  let dictSize = 256;
+  for (let i = 0; i < 256; i++) dict[String.fromCharCode(i)] = i;
+
+  let w = '', codes = 0;
+  for (const c of s) {
+    const wc = w + c;
+    if (dict[wc] !== undefined) {
+      w = wc;
+    } else {
+      codes++;
+      dict[wc] = dictSize++;
+      w = c;
+    }
+  }
+  if (w) codes++;
+
+  // Each code needs ceil(log2(dictSize)) bits
+  const bitsPerCode = Math.max(9, Math.ceil(Math.log2(dictSize + 1)));
+  return Math.ceil(codes * bitsPerCode / 8);
+}
+
+// --- Deflate (LZ77 + Huffman) ---
+function deflateSize(s) {
+  if (!s) return 0;
+  // Step 1: LZ77 tokenization (window=256)
+  const W = 256;
+  const tokens = []; // {type:'lit', ch} or {type:'ref', dist, len}
+  let i = 0;
+  while (i < s.length) {
+    let bestLen = 0, bestDist = 0;
+    const start = Math.max(0, i - W);
+    for (let j = start; j < i; j++) {
+      let len = 0;
+      while (i + len < s.length && s[j + len] === s[i + len] && len < 258) len++;
+      if (len > bestLen) { bestLen = len; bestDist = i - j; }
+    }
+    if (bestLen >= 3) {
+      tokens.push({ type: 'ref', dist: bestDist, len: bestLen });
+      i += bestLen;
+    } else {
+      tokens.push({ type: 'lit', ch: s.charCodeAt(i) });
+      i++;
+    }
+  }
+
+  // Step 2: Huffman-encode the token stream
+  // Count symbol frequencies (literals 0-255, lengths as 256+)
+  const freq = {};
+  for (const t of tokens) {
+    if (t.type === 'lit') {
+      freq[t.ch] = (freq[t.ch] || 0) + 1;
+    } else {
+      const sym = 256 + Math.min(28, Math.floor(Math.log2(Math.max(1, t.len - 3))));
+      freq[sym] = (freq[sym] || 0) + 1;
+    }
+  }
+
+  // Build Huffman code lengths
+  const entries = Object.entries(freq).map(([k, v]) => ({ sym: +k, freq: v }));
+  if (entries.length <= 1) return Math.max(1, Math.ceil(tokens.length / 8));
+
+  let heap = entries.map(e => ({ freq: e.freq, syms: [e.sym] }));
+  heap.sort((a, b) => a.freq - b.freq);
+  while (heap.length > 1) {
+    const a = heap.shift(), b = heap.shift();
+    heap.push({ freq: a.freq + b.freq, left: a, right: b, syms: [...a.syms, ...b.syms] });
+    heap.sort((x, y) => x.freq - y.freq);
+  }
+
+  const codeLens = {};
+  function assignLen(node, depth) {
+    if (!node.left && !node.right) {
+      for (const sym of node.syms) codeLens[sym] = depth;
+      return;
+    }
+    if (node.left) assignLen(node.left, depth + 1);
+    if (node.right) assignLen(node.right, depth + 1);
+  }
+  assignLen(heap[0], 0);
+
+  // Total bits for literal/length stream
+  let totalBits = 0;
+  for (const t of tokens) {
+    if (t.type === 'lit') {
+      totalBits += codeLens[t.ch] || 8;
+    } else {
+      const sym = 256 + Math.min(28, Math.floor(Math.log2(Math.max(1, t.len - 3))));
+      totalBits += (codeLens[sym] || 8) + 5; // +5 extra bits for distance
+    }
+  }
+
+  // Add block header + code table overhead
+  const overhead = 3 + entries.length * 4;
+  return Math.ceil((totalBits + overhead) / 8);
+}
+
+// --- Zstandard (LZ77 + tANS) ---
+function zstdSize(s) {
+  if (!s) return 0;
+  // LZ77 with larger window (1024) + hash chain for faster matching
+  const W = 1024;
+  const tokens = [];
+  let i = 0;
+  while (i < s.length) {
+    let bestLen = 0, bestDist = 0;
+    const start = Math.max(0, i - W);
+    for (let j = start; j < i; j++) {
+      let len = 0;
+      while (i + len < s.length && s[j + len] === s[i + len] && len < 512) len++;
+      if (len > bestLen) { bestLen = len; bestDist = i - j; }
+    }
+    if (bestLen >= 3) {
+      tokens.push({ type: 'ref', dist: bestDist, len: bestLen });
+      i += bestLen;
+    } else {
+      tokens.push({ type: 'lit', ch: s.charCodeAt(i) });
+      i++;
+    }
+  }
+
+  // tANS entropy coding: compute entropy of token symbols
+  const freq = {};
+  let totalSymbols = 0;
+  for (const t of tokens) {
+    const sym = t.type === 'lit' ? t.ch : 256 + Math.min(31, Math.floor(Math.log2(Math.max(1, t.len - 3))));
+    freq[sym] = (freq[sym] || 0) + 1;
+    totalSymbols++;
+  }
+
+  // ANS achieves near-optimal entropy (closer than Huffman)
+  // Entropy = sum of -p*log2(p) per symbol
+  let entropyBits = 0;
+  for (const sym in freq) {
+    const p = freq[sym] / totalSymbols;
+    entropyBits += freq[sym] * (-Math.log2(p));
+  }
+
+  // Distance encoding: log2(dist) bits per reference
+  let distBits = 0;
+  for (const t of tokens) {
+    if (t.type === 'ref') {
+      distBits += Math.max(1, Math.ceil(Math.log2(t.dist + 1)));
+    }
+  }
+
+  // Frame header (4 bytes magic + window desc + content size)
+  const overhead = 8;
+  return Math.ceil((entropyBits + distBits) / 8) + overhead;
+}
+
+// --- UI ---
+function buildBars() {
+  const container = document.getElementById('bars');
+  container.innerHTML = algorithms.map(a => `
+    <div class="bar-container">
+      <div class="bar-label"><span>${a.name}</span><span id="${a.id}-pct">0%</span></div>
+      <div class="bar-bg"><div class="bar-fill" id="bar-${a.id}" style="background:${a.color};width:0%"></div></div>
+    </div>
+  `).join('');
+}
+
+function analyze() {
+  const s = document.getElementById('kc-input').value;
+  const raw = s.length || 1;
+
+  const results = algorithms.map(a => {
+    const val = a.fn(s);
+    const pct = a.id === 'raw' ? 100 : Math.round(val / raw * 100);
+    return { ...a, val, pct };
+  });
+
+  results.forEach(v => {
+    const p = Math.max(2, v.pct);
+    document.getElementById('bar-' + v.id).style.width = p + '%';
+    document.getElementById('bar-' + v.id).textContent = v.pct + '%';
+    document.getElementById(v.id + '-pct').textContent = `${v.pct}% (${v.val} bytes)`;
+  });
+
+  const compressors = results.filter(r => r.id !== 'raw');
+  const best = compressors.reduce((a, b) => a.pct < b.pct ? a : b);
+
+  const desc = best.pct <= 10
+    ? 'Almost all complexity is in the algorithm (environment), not the data.'
+    : best.pct <= 30
+    ? 'Strong structure — the algorithm captures most of the pattern.'
+    : best.pct <= 60
+    ? 'Moderate structure — partial compression by the best-matching algorithm.'
+    : 'Weak compression — the data carries its own complexity, no algorithm helps much.';
+
+  const algNotes = compressors.map(c => {
+    if (c.pct <= compressors[0].pct * 1.1 && c.id !== best.id) return null;
+    return null;
+  });
+
+  document.getElementById('kc-summary').innerHTML =
+    `Best: <b>${best.name}</b> (${best.pct}%). ${desc}`;
+}
+
+function setPreset(type) {
+  const input = document.getElementById('kc-input');
+  switch(type) {
+    case 'aaaa': input.value = 'a'.repeat(100); break;
+    case 'pi': input.value = '3.1415926535897932384626433832795028841971693993751058209749445923078164062862089986280348253421170679'; break;
+    case 'random': input.value = Array.from({length:100},()=>String.fromCharCode(33+Math.floor(Math.random()*94))).join(''); break;
+    case 'pattern': input.value = 'abc'.repeat(34).slice(0,100); break;
+    case 'english': input.value = 'To be or not to be, that is the question. Whether it is nobler in the mind to suffer the slings and arrows'; break;
+    case 'dna': input.value = 'ATCGATCGATCGTTAAGCCGATCGATCGATCGAATTCCGATCGATCGATCGATCGCGATCGATCGATCGATCGATCGATATCGATCGATCGATCGATCGATCG'; break;
+  }
+  analyze();
+}
+
+buildBars();
+document.getElementById('kc-input').addEventListener('input', analyze);
+analyze();
+</script>
+</body>
+</html>
